@@ -3,7 +3,7 @@ from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
 # --------------------------------------------------
 
 
-def sniff_packets(count):
+def sniff_packets(count:int) -> None:
     """
     Sniffs packets and categorizes them by protocol.
     """

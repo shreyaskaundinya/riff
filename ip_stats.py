@@ -2,7 +2,10 @@ from scapy.all import sniff, IP
 
 ip_stats = {}
 
-def get_info_from_packet(packet):
+def get_info_from_packet(packet) -> None:
+    """
+    Categorizes the source and destination IP addresses of the packet
+    """
     global ip_stats
 
     if packet.haslayer(IP):
@@ -15,7 +18,10 @@ def get_info_from_packet(packet):
             ip_stats[packet.getlayer(IP).dst] = {"in": 1, "out": 0}
 
 
-def simple_ip_stats(count):
+def simple_ip_stats(count:int) -> None:
+    """
+    Sniffs <count> number of packets and prints the number of incoming and outgoing requests for each IP address
+    """
     capture = sniff(count=count, prn=get_info_from_packet)
 
     for i in ip_stats:
