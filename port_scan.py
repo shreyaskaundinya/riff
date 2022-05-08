@@ -3,9 +3,19 @@ import threading
 import random
 from ipaddress import IPv4Network
 from typing import List
+import time
 
 from scapy.all import ICMP, IP, sr1, TCP
 
+# --------------------------------------------------
+
+# CONSTANTS
+
+ICMP_TIMEOUT=1
+ICMP_BLOCKED_CODES=[1,2,3,9,10,13]
+ICMP_BLOCK_TYPE=3
+
+TCP_TIMEOUT=1
 # --------------------------------------------------
 
 # Define TCP ports [most common ports]
@@ -19,7 +29,7 @@ port_range = [5601, 9300, 80, 23, 443, 21, 22, 25, 3389, 110, 445, 139, 143, 53,
 
 
 # Count of number of live hosts
-live_count = 0
+online_host_count = 0
 
 # Stores the open port information for each host
 open_ports = {}
@@ -29,25 +39,33 @@ threads = []
 
 # --------------------------------------------------
 
+blocked_hosts = lambda host,addresses: host in (addresses.network_address, addresses.broadcast_address)
+
 def host_scan(host:str, ports: List[int], addresses:IPv4Network) -> None:
     """
-    Scans the host for live hosts using ICMP
+    Scans the host for live hosts using ICMP ping
     """
-    global live_count
-    if (host in (addresses.network_address, addresses.broadcast_address)):
+    global online_host_count
+
+    if (blocked_hosts(host, addresses)):
         # Skip network and broadcast addresses
         return
 
-    resp = sr1(IP(dst=str(host))/ICMP(), timeout=1, verbose=0)
+    # Send a ICMP packet to the host
+    # If the host is active, the ICMP packet will be answered with response
+    # If the host is not active, the ICMP packet will be dropped silently
+    # If the host blocks the ICMP packet, the ICMP packet will be answered with a ICMP packet of type 3 and code 1,2,3,9,10 or 13
+    icmp_res = sr1(IP(dst=str(host))/ICMP(), timeout=ICMP_TIMEOUT, verbose=0)
 
-    if resp is None:
-        print(f"{host} is down or not responding.")
+    if icmp_res is None:
+        print(f"{host} : DOWN/NON RESPONSIVE")
         
-    elif (int(resp.getlayer(ICMP).type)==3 and int(resp.getlayer(ICMP).code) in [1,2,3,9,10,13]):
-        print(f"{host} is blocking ICMP.")
+    elif (int(icmp_res.getlayer(ICMP).type)==ICMP_BLOCK_TYPE and int(icmp_res.getlayer(ICMP).code) in ICMP_BLOCKED_CODES):
+        print(f"{host} : BLOCKING ICMP PACKET")
 
     else :
-        live_count += 1
+        online_host_count += 1
+        # only if host is online scan it for open ports
         port_scan(host, ports)
 
 def port_scan(host: str, ports: List[int]) -> None:
@@ -59,41 +77,47 @@ def port_scan(host: str, ports: List[int]) -> None:
     open_ports[host] = []
 
     for dst_port in ports:
-        src_port = random.randint(1025, 65534)
-        resp = sr1(
-            IP(dst=host)/TCP(sport=src_port,dport=dst_port,flags="S"),timeout=1,
+        src_port = random.randint(1025, 65565)
+        tcp_res = sr1(
+            IP(dst=host)/TCP(sport=src_port,dport=dst_port,flags="S"),timeout=TCP_TIMEOUT,
             verbose=0,
         )
 
-        if resp is None:
-            print(f"{host}:{dst_port} is filtered (silently dropped).")
+        if tcp_res is None:
+            print(f"{host}:{dst_port} : FILTERED [dropped]")
             
-        elif(resp.haslayer(TCP)):
+        elif(tcp_res.haslayer(TCP)):
             # Check if SYN is received
-            if(resp.getlayer(TCP).flags == 0x12):
+            if(tcp_res.getlayer(TCP).flags == 0x12):
                 sr1(
                     IP(dst=host)/TCP(sport=src_port,dport=dst_port,flags='R'),
-                    timeout=1,
+                    timeout=TCP_TIMEOUT,
                     verbose=0,
                 )
-                print(f"{host}:{dst_port} is open.")
+                print(f"{host}:{dst_port} : OPEN")
                 open_ports[host].append(dst_port)
             
             # Check if RST is received
-            elif (resp.getlayer(TCP).flags == 0x14):
-                print(f"{host}:{dst_port} is closed.")
+            elif (tcp_res.getlayer(TCP).flags == 0x14):
+                print(f"{host}:{dst_port} : CLOSED")
                 
         # In some networks the SYN packets are blocked by firewall we come to know this when the ICMP packet is of type 3 and has code 1,2,3,9,10 or 13
         # We can get past this firewall by using FIN flag in the packet 
-        elif(resp.haslayer(ICMP) and int(resp.getlayer(ICMP).type) == 3 and int(resp.getlayer(ICMP).code) in (1, 2, 3, 9, 10, 13)):
-                print(f"{host}:{dst_port} is filtered (silently dropped).")
+        elif(tcp_res.haslayer(ICMP) and int(tcp_res.getlayer(ICMP).type)==ICMP_BLOCK_TYPE and int(tcp_res.getlayer(ICMP).code) in ICMP_BLOCKED_CODES):
+                print(f"{host}:{dst_port} : FILTERED [dropped]")
 
 
 def scan(network: str) -> None:
     """
-    Scans the network for live hosts.
+    Scans the network for live hosts and does port scan.
+        - Creates one thread per host.
+        - Each thread once joined
+            - Checks if host is alive
+            - If host is alive, scans the host for open ports
     """
-    global open_ports, live_count
+    global open_ports, online_host_count
+
+    start = time.time()
     # make list of addresses out of network, set live host counter
     addresses = IPv4Network(network)
 
@@ -103,10 +127,18 @@ def scan(network: str) -> None:
         threads.append(thread)
         thread.start()
     
+    # await completion of each thread
     for i in range(len(threads)):
         threads[i].join()
 
+    # calculate total time taken to scan the network
+    end = time.time()
+    elapsed = end - start
+
+    # print the open ports of each online host
     for key, value in open_ports.items():
-        print(f"{key} has open ports: {value}")
+        print(f"{key} has open ports : {value}")
     
-    print(f"{live_count}/{addresses.num_addresses} hosts are online.")
+    print(f"{online_host_count}/{addresses.num_addresses} hosts are online.")
+    
+    print(f"Scanned {addresses.num_addresses} hosts in {elapsed} seconds.")
